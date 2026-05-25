@@ -163,7 +163,7 @@ function buildTermRequest(item) {
 }
 
 function writeDebugFile(filename, data) {
-  const outDir = path.join(__dirname, 'debug');
+  const outDir = process.env.VERCEL ? path.join('/tmp', 'up-color-generator-debug') : path.join(__dirname, 'debug');
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
   const filePath = path.join(outDir, filename);
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
@@ -393,6 +393,10 @@ app.post('/api/apply', async (req,res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`UP Zero Color UI v4 disponível em http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`UP Zero Color UI v4 disponível em http://localhost:${PORT}`);
+  });
+}
+
+export default app;
