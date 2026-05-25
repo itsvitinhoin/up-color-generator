@@ -156,8 +156,10 @@ async function applyUpdates(){
       return { ...item, status: result.status, message: result.message, persisted_rgb: result.persisted_rgb || '', match_strategy: result.match_strategy || '' };
     });
 
-    const dbg = data.debug_files ? ` Payload: ${data.debug_files.payload} | Response: ${data.debug_files.post_response} | Report: ${data.debug_files.validation_report}` : '';
-    state.diagnostics.unshift({ title:'Envio e validação concluídos', message:`Modo: ${data.mode} | Total: ${data.summary.total} | Confirmados: ${data.summary.success} | Não persistidos: ${data.summary.failed}.${dbg}`, ok:data.summary.failed===0, time:new Date().toLocaleString() });
+    const failedItems = data.results.filter(item => !item.ok).slice(0, 8).map(item => `${item.name}: ${item.message}`).join(' | ');
+    const debugLinks = data.debug_files?.validation_report_url ? ` Relatório: ${data.debug_files.validation_report_url}` : '';
+    const failedText = failedItems ? ` Primeiras falhas: ${failedItems}.` : '';
+    state.diagnostics.unshift({ title:'Envio e validação concluídos', message:`Modo: ${data.mode} | Total: ${data.summary.total} | Confirmados: ${data.summary.success} | Não persistidos: ${data.summary.failed}.${failedText}${debugLinks}`, ok:data.summary.failed===0, time:new Date().toLocaleString() });
     renderDiagnostics(); renderTable();
   }catch(error){
     state.diagnostics.unshift({ title:'Falha no envio', message:error.message || 'Erro desconhecido.', ok:false, time:new Date().toLocaleString() });

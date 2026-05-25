@@ -36,6 +36,7 @@ const DEFAULTS = {
   attributesPath: '/external/v1/attributes',
   attributeName: 'Cor',
   openaiModel: 'gpt-5.4-nano',
+  applyConcurrency: Number(process.env.APPLY_CONCURRENCY || 4),
 };
 
 const BASE_MAP = {
@@ -113,6 +114,52 @@ async function fetchJson(url, options={}) {
   return data;
 }
 
+function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function shouldRetryFetchError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return (
+    message.includes('fetch failed') ||
+    message.includes('socket') ||
+    message.includes('timeout') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('http 408') ||
+    message.includes('http 409') ||
+    message.includes('http 425') ||
+    message.includes('http 429') ||
+    message.includes('http 500') ||
+    message.includes('http 502') ||
+    message.includes('http 503') ||
+    message.includes('http 504')
+  );
+}
+
+async function fetchJsonWithRetry(url, options={}, retryOptions={}) {
+  const retries = Number(retryOptions.retries ?? 4);
+  const baseDelayMs = Number(retryOptions.baseDelayMs ?? 350);
+  const timeoutMs = Number(retryOptions.timeoutMs ?? 25000);
+  let lastError;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const data = await fetchJson(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      return { data, attempts: attempt + 1 };
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+      if (attempt >= retries || !shouldRetryFetchError(error)) break;
+      const jitter = Math.floor(Math.random() * 150);
+      await sleep(baseDelayMs * (2 ** attempt) + jitter);
+    }
+  }
+
+  throw lastError;
+}
+
 function extractResponseText(data) {
   if (typeof data?.output_text === 'string') return data.output_text;
   const chunks = [];
@@ -168,6 +215,27 @@ function writeDebugFile(filename, data) {
   const filePath = path.join(outDir, filename);
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
   return filePath;
+}
+
+function readDebugFile(filename) {
+  const safeName = path.basename(String(filename || ''));
+  const outDir = process.env.VERCEL ? path.join('/tmp', 'up-color-generator-debug') : path.join(__dirname, 'debug');
+  const filePath = path.join(outDir, safeName);
+  if (!fs.existsSync(filePath)) return null;
+  return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let index = 0;
+  const count = Math.max(1, Number(concurrency || 1));
+  await Promise.all(Array.from({ length: count }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      results[current] = await worker(items[current], current);
+    }
+  }));
+  return results;
 }
 
 function chunkItems(items, size) {
@@ -284,6 +352,15 @@ function applyAiSuggestions(items, suggestions) {
 
 app.get('/api/health', (_,res) => res.json({ ok:true }));
 app.get('/api/config', (_,res) => res.json({ ok:true, openai:{ configured:Boolean(getConfiguredOpenaiApiKey()), model:DEFAULTS.openaiModel } }));
+app.get('/api/debug/:filename', (req,res) => {
+  try {
+    const data = readDebugFile(req.params.filename);
+    if (!data) return res.status(404).json({ error:'Arquivo de debug não encontrado nesta instância.' });
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Erro ao ler debug.' });
+  }
+});
 
 app.post('/api/scan', async (req,res) => {
   try {
@@ -356,38 +433,90 @@ app.post('/api/apply', async (req,res) => {
     const attributeUrl = `${base}${attributesPath}`;
     const selectedItems = items.filter(item => item.selected !== false);
     const termUrl = `${attributeUrl}/${encodeURIComponent(String(attribute.id))}/terms`;
-    const requests = selectedItems.map(item => ({ id:String(item.id), url:termUrl, body:buildTermRequest(item) }));
+    const requests = selectedItems.map(item => ({ id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), url:termUrl, body:buildTermRequest(item) }));
 
     const payloadFile = writeDebugFile('last-payload.json', { mode:'term_upsert', attribute_id:String(attribute.id), requests });
-    const postResults = [];
-    for (const request of requests) {
-      try {
-        const data = await fetchJson(request.url, { method:'POST', headers: authHeaders(apiKey.trim()), body: JSON.stringify(request.body) });
-        postResults.push({ id:request.id, ok:true, response:data });
-      } catch (error) {
-        postResults.push({ id:request.id, ok:false, error:error instanceof Error ? error.message : 'Falha ao atualizar termo.' });
+
+    const postResults = await mapWithConcurrency(requests, DEFAULTS.applyConcurrency, async (request) => {
+      if (!isValidHex(request.body.rgb)) {
+        return { id:request.id, ok:false, attempts:0, error:`HEX inválido: ${request.body.rgb || '(vazio)'}` };
       }
-    }
+      try {
+        const result = await fetchJsonWithRetry(request.url, { method:'POST', headers: authHeaders(apiKey.trim()), body: JSON.stringify(request.body) }, { retries:4, timeoutMs:25000 });
+        return { id:request.id, ok:true, attempts:result.attempts, response:result.data };
+      } catch (error) {
+        return { id:request.id, ok:false, attempts:5, error:error instanceof Error ? error.message : 'Falha ao atualizar termo.' };
+      }
+    });
     const responseFile = writeDebugFile('last-post-response.json', postResults);
 
-    const afterRaw = await fetchJson(termUrl, { method:'GET', headers: authHeaders(apiKey.trim()) });
-    const verificationMap = buildVerificationMap(normalizeListPayload(afterRaw));
     const postResultMap = new Map(postResults.map(result => [String(result.id), result]));
+    const selectedById = new Map(selectedItems.map(item => [String(item.id), item]));
+    let verificationMap = buildVerificationMap([]);
+    let results = [];
 
-    const results = selectedItems.map(item => {
-      const postResult = postResultMap.get(String(item.id));
-      if (postResult && !postResult.ok) {
-        return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:'', match_strategy:'none', ok:false, status:'fail', message:`Falha no POST do termo: ${postResult.error}` };
-      }
-      const verification = verifyItem(item, verificationMap);
-      return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:verification.ok, status:verification.status, message:verification.message };
-    });
+    for (let validationAttempt = 0; validationAttempt < 4; validationAttempt++) {
+      if (validationAttempt > 0) await sleep(900 * validationAttempt);
+      const afterResult = await fetchJsonWithRetry(termUrl, { method:'GET', headers: authHeaders(apiKey.trim()) }, { retries:3, timeoutMs:25000 });
+      verificationMap = buildVerificationMap(normalizeListPayload(afterResult.data));
+
+      results = selectedItems.map(item => {
+        const postResult = postResultMap.get(String(item.id));
+        const verification = verifyItem(item, verificationMap);
+        if (verification.ok) {
+          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:true, status:verification.status, message: postResult?.ok === false ? `Persistido apesar de erro no retorno do POST: ${postResult.error}` : verification.message };
+        }
+        if (postResult && !postResult.ok) {
+          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb || '', match_strategy:verification.match_strategy || 'none', ok:false, status:'fail', message:`Falha no POST do termo: ${postResult.error}` };
+        }
+        return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:false, status:verification.status, message:verification.message };
+      });
+
+      if (results.every(result => result.ok)) break;
+    }
+
+    const recoverableItems = results
+      .filter(result => !result.ok && result.status !== 'fail')
+      .map(result => selectedById.get(String(result.id)))
+      .filter(Boolean);
+
+    if (recoverableItems.length) {
+      const retryRequests = recoverableItems.map(item => ({ id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), url:termUrl, body:buildTermRequest(item) }));
+      const retryPostResults = await mapWithConcurrency(retryRequests, 2, async (request) => {
+        try {
+          const result = await fetchJsonWithRetry(request.url, { method:'POST', headers: authHeaders(apiKey.trim()), body: JSON.stringify(request.body) }, { retries:3, timeoutMs:25000, baseDelayMs:600 });
+          return { id:request.id, ok:true, retry:true, attempts:result.attempts, response:result.data };
+        } catch (error) {
+          return { id:request.id, ok:false, retry:true, attempts:4, error:error instanceof Error ? error.message : 'Falha ao retentar termo.' };
+        }
+      });
+      for (const result of retryPostResults) postResultMap.set(String(result.id), result);
+
+      await sleep(1500);
+      const afterRetry = await fetchJsonWithRetry(termUrl, { method:'GET', headers: authHeaders(apiKey.trim()) }, { retries:3, timeoutMs:25000 });
+      verificationMap = buildVerificationMap(normalizeListPayload(afterRetry.data));
+      results = selectedItems.map(item => {
+        const postResult = postResultMap.get(String(item.id));
+        const verification = verifyItem(item, verificationMap);
+        if (verification.ok) {
+          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:true, status:verification.status, message: postResult?.retry ? `Persistido com sucesso após retry. Confirmação por ${verification.match_strategy}.` : verification.message };
+        }
+        if (postResult && !postResult.ok) {
+          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb || '', match_strategy:verification.match_strategy || 'none', ok:false, status:'fail', message:`Falha no POST do termo: ${postResult.error}` };
+        }
+        return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:false, status:verification.status, message:verification.message };
+      });
+    }
 
     const success = results.filter(r => r.ok).length;
     const failed = results.length - success;
-    const reportFile = writeDebugFile('last-validation-report.json', { summary:{ total:results.length, success, failed }, results });
+    const reportFile = writeDebugFile('last-validation-report.json', {
+      summary:{ total:results.length, success, failed, post_failed:postResults.filter(result => !result.ok).length, concurrency:DEFAULTS.applyConcurrency },
+      failed_results: results.filter(result => !result.ok),
+      results
+    });
 
-    res.json({ ok: failed === 0, summary:{ total:results.length, success, failed }, results, mode:'term_upsert', debug_files:{ payload:payloadFile, post_response:responseFile, validation_report:reportFile } });
+    res.json({ ok: failed === 0, summary:{ total:results.length, success, failed }, results, mode:'term_upsert_retry', debug_files:{ payload:payloadFile, post_response:responseFile, validation_report:reportFile, validation_report_url:'/api/debug/last-validation-report.json', post_response_url:'/api/debug/last-post-response.json' } });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Erro ao aplicar atualizações.' });
   }
