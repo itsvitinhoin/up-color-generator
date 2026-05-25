@@ -125,7 +125,6 @@ function shouldRetryFetchError(error) {
     message.includes('econnreset') ||
     message.includes('etimedout') ||
     message.includes('http 408') ||
-    message.includes('http 409') ||
     message.includes('http 425') ||
     message.includes('http 429') ||
     message.includes('http 500') ||
@@ -209,6 +208,18 @@ function buildTermRequest(item) {
   return { code:String(item.code ?? ''), name:String(item.name ?? ''), sort_order:Number(item.sort_order ?? 0), rgb, meta:{ rgb } };
 }
 
+function buildTermRequestVariants(item) {
+  const rgb = String(item.selected_rgb || '').trim().toUpperCase();
+  const code = String(item.code ?? '');
+  const name = String(item.name ?? '');
+  const sort_order = Number(item.sort_order ?? 0);
+  return [
+    { label:'rgb_meta', body:{ code, name, sort_order, rgb, meta:{ rgb } } },
+    { label:'rgb_only', body:{ code, name, sort_order, rgb } },
+    { label:'minimal_rgb', body:{ code, name, rgb } },
+  ];
+}
+
 function writeDebugFile(filename, data) {
   const outDir = process.env.VERCEL ? path.join('/tmp', 'up-color-generator-debug') : path.join(__dirname, 'debug');
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
@@ -242,6 +253,33 @@ function chunkItems(items, size) {
   const chunks = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
+}
+
+async function postTermWithFallbacks(request, apiKey) {
+  let lastError = null;
+  const variants = buildTermRequestVariants(request.item);
+
+  for (const variant of variants) {
+    try {
+      const result = await fetchJsonWithRetry(
+        request.url,
+        { method:'POST', headers: authHeaders(apiKey), body: JSON.stringify(variant.body) },
+        { retries: variant.label === 'rgb_meta' ? 3 : 0, timeoutMs:25000 }
+      );
+      return { id:request.id, ok:true, attempts:result.attempts, payload_variant:variant.label, response:result.data };
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error);
+      if (!message.includes('HTTP 409')) break;
+    }
+  }
+
+  return {
+    id:request.id,
+    ok:false,
+    attempts:variants.length,
+    error:lastError instanceof Error ? lastError.message : 'Falha ao atualizar termo.',
+  };
 }
 
 function buildAiSchema() {
@@ -433,7 +471,7 @@ app.post('/api/apply', async (req,res) => {
     const attributeUrl = `${base}${attributesPath}`;
     const selectedItems = items.filter(item => item.selected !== false);
     const termUrl = `${attributeUrl}/${encodeURIComponent(String(attribute.id))}/terms`;
-    const requests = selectedItems.map(item => ({ id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), url:termUrl, body:buildTermRequest(item) }));
+    const requests = selectedItems.map(item => ({ id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), url:termUrl, item, body:buildTermRequest(item) }));
 
     const payloadFile = writeDebugFile('last-payload.json', { mode:'term_upsert', attribute_id:String(attribute.id), requests });
 
@@ -441,12 +479,7 @@ app.post('/api/apply', async (req,res) => {
       if (!isValidHex(request.body.rgb)) {
         return { id:request.id, ok:false, attempts:0, error:`HEX inválido: ${request.body.rgb || '(vazio)'}` };
       }
-      try {
-        const result = await fetchJsonWithRetry(request.url, { method:'POST', headers: authHeaders(apiKey.trim()), body: JSON.stringify(request.body) }, { retries:4, timeoutMs:25000 });
-        return { id:request.id, ok:true, attempts:result.attempts, response:result.data };
-      } catch (error) {
-        return { id:request.id, ok:false, attempts:5, error:error instanceof Error ? error.message : 'Falha ao atualizar termo.' };
-      }
+      return postTermWithFallbacks(request, apiKey.trim());
     });
     const responseFile = writeDebugFile('last-post-response.json', postResults);
 
@@ -467,7 +500,7 @@ app.post('/api/apply', async (req,res) => {
           return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:true, status:verification.status, message: postResult?.ok === false ? `Persistido apesar de erro no retorno do POST: ${postResult.error}` : verification.message };
         }
         if (postResult && !postResult.ok) {
-          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb || '', match_strategy:verification.match_strategy || 'none', ok:false, status:'fail', message:`Falha no POST do termo: ${postResult.error}` };
+          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb || '', match_strategy:verification.match_strategy || 'none', ok:false, status:'fail', message:`Falha no POST do termo id=${String(item.id)} code=${String(item.code || '')}: ${postResult.error}` };
         }
         return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:false, status:verification.status, message:verification.message };
       });
@@ -476,19 +509,15 @@ app.post('/api/apply', async (req,res) => {
     }
 
     const recoverableItems = results
-      .filter(result => !result.ok && result.status !== 'fail')
+      .filter(result => !result.ok)
       .map(result => selectedById.get(String(result.id)))
       .filter(Boolean);
 
     if (recoverableItems.length) {
-      const retryRequests = recoverableItems.map(item => ({ id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), url:termUrl, body:buildTermRequest(item) }));
+      const retryRequests = recoverableItems.map(item => ({ id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), url:termUrl, item, body:buildTermRequest(item) }));
       const retryPostResults = await mapWithConcurrency(retryRequests, 2, async (request) => {
-        try {
-          const result = await fetchJsonWithRetry(request.url, { method:'POST', headers: authHeaders(apiKey.trim()), body: JSON.stringify(request.body) }, { retries:3, timeoutMs:25000, baseDelayMs:600 });
-          return { id:request.id, ok:true, retry:true, attempts:result.attempts, response:result.data };
-        } catch (error) {
-          return { id:request.id, ok:false, retry:true, attempts:4, error:error instanceof Error ? error.message : 'Falha ao retentar termo.' };
-        }
+        const result = await postTermWithFallbacks(request, apiKey.trim());
+        return { ...result, retry:true };
       });
       for (const result of retryPostResults) postResultMap.set(String(result.id), result);
 
@@ -502,7 +531,7 @@ app.post('/api/apply', async (req,res) => {
           return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:true, status:verification.status, message: postResult?.retry ? `Persistido com sucesso após retry. Confirmação por ${verification.match_strategy}.` : verification.message };
         }
         if (postResult && !postResult.ok) {
-          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb || '', match_strategy:verification.match_strategy || 'none', ok:false, status:'fail', message:`Falha no POST do termo: ${postResult.error}` };
+          return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb || '', match_strategy:verification.match_strategy || 'none', ok:false, status:'fail', message:`Falha no POST do termo id=${String(item.id)} code=${String(item.code || '')}: ${postResult.error}` };
         }
         return { id:String(item.id), name:String(item.name || ''), code:String(item.code || ''), sent_rgb:String(item.selected_rgb || '').toUpperCase(), persisted_rgb:verification.persisted_rgb, match_strategy:verification.match_strategy, ok:false, status:verification.status, message:verification.message };
       });
