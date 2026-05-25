@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UP Zero • Gerador e sincronizador de cores v4</title>
+  <style>
+    :root{--bg:#0b0d10;--panel:#12161b;--panel-2:#171c22;--muted:#8a94a6;--text:#f3f6fb;--border:#242b35;--accent:#69d2a6}
+    *{box-sizing:border-box} body{margin:0;background:linear-gradient(180deg,#0b0d10 0%, #0f1318 100%);color:var(--text);font:14px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    .wrap{max-width:1520px;margin:0 auto;padding:24px}.hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:20px}
+    h1{margin:0 0 6px;font-size:28px}.sub{color:var(--muted);max-width:980px}.grid{display:grid;grid-template-columns:400px 1fr;gap:16px}
+    .card{background:rgba(18,22,27,.88);border:1px solid var(--border);border-radius:16px;padding:16px}.field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+    label{color:#cfd7e4;font-weight:600} input[type=text],input[type=password]{width:100%;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px}
+    input[type=checkbox]{accent-color:#69d2a6}.row{display:flex;gap:10px}.row>*{flex:1}
+    button{border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer}.btn-primary{background:var(--accent);color:#082017}.btn-secondary{background:#202834;color:var(--text);border:1px solid var(--border)}
+    .btn-primary:disabled,.btn-secondary:disabled{opacity:.5;cursor:not-allowed}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+    .stat{background:var(--panel-2);border:1px solid var(--border);border-radius:12px;padding:12px}.stat .k{color:var(--muted);font-size:12px}.stat .v{font-size:22px;font-weight:800;margin-top:4px}
+    .toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}.toolbar .left,.toolbar .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .badge{display:inline-flex;align-items:center;gap:6px;background:#1b222c;border:1px solid var(--border);border-radius:999px;padding:8px 10px;color:#d9e1ec}.search{min-width:260px}
+    table{width:100%;border-collapse:collapse} thead th{position:sticky;top:0;background:#11161d;z-index:2} th,td{padding:10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle}
+    tbody tr:hover{background:rgba(255,255,255,.02)} .swatch{width:30px;height:30px;border-radius:999px;border:1px solid #ffffff22;box-shadow:inset 0 0 0 1px #00000022}
+    .hex{width:120px}.name{font-weight:700}.muted{color:var(--muted)} .status-pill{display:inline-flex;padding:5px 8px;border-radius:999px;font-size:12px;font-weight:700}
+    .source-pill{display:inline-flex;padding:5px 8px;border-radius:8px;background:#1e2b32;color:#bdefff;font-size:12px;font-weight:700}
+    .status-pending{background:#2b3340;color:#dce7f5}.status-ok{background:#163323;color:#b4f5c8}.status-fail{background:#3a1e1e;color:#ffc2c2}
+    .diag{max-height:280px;overflow:auto;background:#0e1217;border:1px solid var(--border);border-radius:12px;padding:8px}.diag-item{padding:10px;border-bottom:1px solid var(--border)} .diag-item:last-child{border-bottom:0}
+    .footer-note{margin-top:12px;color:var(--muted);font-size:12px}.small{font-size:12px;color:var(--muted)} .sticky{position:sticky;top:16px}
+    .table-wrap{max-height:72vh;overflow:auto;border:1px solid var(--border);border-radius:14px}.check{width:18px;height:18px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .option{display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid var(--border);border-radius:12px;background:var(--panel-2);margin-bottom:10px}
+    .debug-box{background:var(--panel-2);border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:12px}
+    @media (max-width:1100px){.grid{grid-template-columns:1fr}.sticky{position:static}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>UP Zero • Gerador e sincronizador de cores v4</h1>
+        <div class="sub">Versão final usando o endpoint idempotente de terms. O projeto lê as cores vazias, gera HEX por heurística ou IA, envia cada term pelo contrato oficial da API e valida com GET posterior. Também salva arquivos de debug com payload, resposta e relatório final.</div>
+      </div>
+      <div class="badge">IA em massa + Upsert de terms</div>
+    </div>
+
+    <div class="grid">
+      <div class="card sticky">
+        <h2>1. Conexão e configuração</h2>
+        <div class="field"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="Cole sua X-API-Key" /></div>
+        <div class="field"><label for="baseUrl">Base URL</label><input id="baseUrl" type="text" value="https://api.upzero.com.br" /></div>
+        <div class="field"><label for="attributesPath">Path de atributos</label><input id="attributesPath" type="text" value="/external/v1/attributes" /></div>
+        <div class="field"><label for="attributeName">Nome do atributo</label><input id="attributeName" type="text" value="Cor" /></div>
+        <div class="field"><label for="openaiApiKey">OpenAI API Key</label><input id="openaiApiKey" type="password" placeholder="Opcional se não estiver configurada no backend" /></div>
+        <div class="field"><label for="openaiModel">Modelo IA</label><input id="openaiModel" type="text" value="gpt-5.4-nano" /></div>
+        <div class="option"><input id="useAiSuggestions" type="checkbox" /><div><label for="useAiSuggestions">Usar IA no mapeamento</label><div class="small">Gera os HEX em lote para nomes comerciais de cores antes do preview.</div></div></div>
+        <div class="option"><input id="includeExistingTerms" type="checkbox" checked disabled /><div><label for="includeExistingTerms">Atualização segura por term</label><div class="small">Usa <span class="mono">POST /attributes/{attribute_id}/terms</span> e altera apenas o <span class="mono">rgb</span> dos selecionados.</div></div></div>
+        <div class="row"><button id="scanBtn" class="btn-primary">2. Mapear e gerar preview</button><button id="resetBtn" class="btn-secondary">Limpar</button></div>
+        <div class="stats">
+          <div class="stat"><div class="k">Total de termos</div><div class="v" id="totalTerms">—</div></div>
+          <div class="stat"><div class="k">Sem HEX</div><div class="v" id="missingTerms">—</div></div>
+          <div class="stat"><div class="k">Prontos para envio</div><div class="v" id="readyTerms">—</div></div>
+        </div>
+        <div class="debug-box">
+          <div><strong>Arquivos de debug</strong></div>
+          <div class="small">Depois do envio, o backend salva:</div>
+          <div class="small mono">debug/last-payload.json</div>
+          <div class="small mono">debug/last-post-response.json</div>
+          <div class="small mono">debug/last-validation-report.json</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="toolbar">
+          <div class="left"><div class="badge">3. Preview, edição e validação</div><input id="searchInput" class="search" type="text" placeholder="Buscar por nome..." /></div>
+          <div class="right"><button id="aiSuggestBtn" class="btn-secondary" disabled>Gerar HEX com IA</button><button id="selectAllBtn" class="btn-secondary" disabled>Selecionar todos</button><button id="applyBtn" class="btn-primary" disabled>4. Enviar e validar</button></div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th style="width:42px"></th><th>Nome</th><th>Preview</th><th>HEX gerado</th><th>Editar</th><th>Fonte HEX</th><th>Persistido</th><th>Status</th><th>Estratégia</th><th>Mensagem</th></tr></thead>
+            <tbody id="colorsTableBody"></tbody>
+          </table>
+        </div>
+
+        <div style="margin-top:16px"><div class="toolbar"><div class="left"><div class="badge">5. Diagnóstico</div></div></div><div class="diag" id="diagnostics"></div></div>
+      </div>
+    </div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
