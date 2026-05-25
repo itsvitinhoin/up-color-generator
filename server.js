@@ -205,25 +205,16 @@ function verifyItem(item, map){
 
 function buildTermRequest(item) {
   const rgb = String(item.selected_rgb || '').trim().toUpperCase();
-  return { code:String(item.code ?? ''), name:String(item.name ?? ''), sort_order:Number(item.sort_order ?? 0), rgb, meta:{ rgb } };
+  return { code:String(item.code ?? ''), name:String(item.name ?? ''), sort_order:Number(item.sort_order ?? 0), rgb };
 }
 
 function buildTermRequestVariants(item) {
   const rgb = String(item.selected_rgb || '').trim().toUpperCase();
-  const id = String(item.id ?? '');
-  const attribute_id = String(item.attribute_id ?? '');
   const code = String(item.code ?? '');
   const name = String(item.name ?? '');
   const sort_order = Number(item.sort_order ?? 0);
   return [
-    { label:'direct_patch_rgb', method:'PATCH', direct:true, body:{ rgb, meta:{ rgb } } },
-    { label:'direct_patch_full', method:'PATCH', direct:true, body:{ id, attribute_id, code, name, sort_order, rgb, meta:{ rgb } } },
-    { label:'direct_put_full', method:'PUT', direct:true, body:{ id, attribute_id, code, name, sort_order, rgb, meta:{ rgb } } },
-    { label:'id_rgb_meta', method:'POST', body:{ id, attribute_id, code, name, sort_order, rgb, meta:{ rgb } } },
-    { label:'id_rgb_only', method:'POST', body:{ id, attribute_id, code, name, sort_order, rgb } },
-    { label:'rgb_meta', method:'POST', body:{ code, name, sort_order, rgb, meta:{ rgb } } },
-    { label:'rgb_only', method:'POST', body:{ code, name, sort_order, rgb } },
-    { label:'minimal_rgb', method:'POST', body:{ code, name, rgb } },
+    { label:'official_term_upsert', method:'POST', body:{ code, name, sort_order, rgb } },
   ];
 }
 
@@ -272,7 +263,7 @@ async function postTermWithFallbacks(request, apiKey) {
       const result = await fetchJsonWithRetry(
         url,
         { method:variant.method || 'POST', headers: authHeaders(apiKey), body: JSON.stringify(variant.body) },
-        { retries: variant.label === 'rgb_meta' ? 3 : 0, timeoutMs:25000 }
+        { retries:3, timeoutMs:25000 }
       );
       return { id:request.id, ok:true, attempts:result.attempts, payload_variant:variant.label, method:variant.method || 'POST', response:result.data };
     } catch (error) {
