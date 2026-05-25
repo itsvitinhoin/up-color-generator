@@ -210,13 +210,20 @@ function buildTermRequest(item) {
 
 function buildTermRequestVariants(item) {
   const rgb = String(item.selected_rgb || '').trim().toUpperCase();
+  const id = String(item.id ?? '');
+  const attribute_id = String(item.attribute_id ?? '');
   const code = String(item.code ?? '');
   const name = String(item.name ?? '');
   const sort_order = Number(item.sort_order ?? 0);
   return [
-    { label:'rgb_meta', body:{ code, name, sort_order, rgb, meta:{ rgb } } },
-    { label:'rgb_only', body:{ code, name, sort_order, rgb } },
-    { label:'minimal_rgb', body:{ code, name, rgb } },
+    { label:'direct_patch_rgb', method:'PATCH', direct:true, body:{ rgb, meta:{ rgb } } },
+    { label:'direct_patch_full', method:'PATCH', direct:true, body:{ id, attribute_id, code, name, sort_order, rgb, meta:{ rgb } } },
+    { label:'direct_put_full', method:'PUT', direct:true, body:{ id, attribute_id, code, name, sort_order, rgb, meta:{ rgb } } },
+    { label:'id_rgb_meta', method:'POST', body:{ id, attribute_id, code, name, sort_order, rgb, meta:{ rgb } } },
+    { label:'id_rgb_only', method:'POST', body:{ id, attribute_id, code, name, sort_order, rgb } },
+    { label:'rgb_meta', method:'POST', body:{ code, name, sort_order, rgb, meta:{ rgb } } },
+    { label:'rgb_only', method:'POST', body:{ code, name, sort_order, rgb } },
+    { label:'minimal_rgb', method:'POST', body:{ code, name, rgb } },
   ];
 }
 
@@ -261,16 +268,23 @@ async function postTermWithFallbacks(request, apiKey) {
 
   for (const variant of variants) {
     try {
+      const url = variant.direct ? `${request.url}/${encodeURIComponent(String(request.id))}` : request.url;
       const result = await fetchJsonWithRetry(
-        request.url,
-        { method:'POST', headers: authHeaders(apiKey), body: JSON.stringify(variant.body) },
+        url,
+        { method:variant.method || 'POST', headers: authHeaders(apiKey), body: JSON.stringify(variant.body) },
         { retries: variant.label === 'rgb_meta' ? 3 : 0, timeoutMs:25000 }
       );
-      return { id:request.id, ok:true, attempts:result.attempts, payload_variant:variant.label, response:result.data };
+      return { id:request.id, ok:true, attempts:result.attempts, payload_variant:variant.label, method:variant.method || 'POST', response:result.data };
     } catch (error) {
       lastError = error;
       const message = String(error?.message || error);
-      if (!message.includes('HTTP 409')) break;
+      const canTryNext = (
+        message.includes('HTTP 404') ||
+        message.includes('HTTP 405') ||
+        message.includes('HTTP 409') ||
+        message.includes('HTTP 422')
+      );
+      if (!canTryNext) break;
     }
   }
 
